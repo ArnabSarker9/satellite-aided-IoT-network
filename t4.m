@@ -12,7 +12,7 @@ h_s = 600e3;          % Altitude of satellite (600 km)
 h_u = 0;              % Altitude of IoT sensors (fixed at ground level)
 c = 3e8;              % Speed of light in m/s (300,000,000 m/s)
 sigma_shadow = 3;     % Shadowing standard deviation (dB) (reduced for debugging)
-capture_th = 5;       % Capture threshold in dB
+capture_th = 1;       % Capture threshold in dB
 
 N = 100; % number of sensors
 
@@ -36,25 +36,28 @@ elev_angles = linspace(0, 90, N);  % Array for elevation angles (0° to 90°)
 % monte carlo simulation
 for mc = 1:MC
 
+    % Phase 1: IoT sensors decide to transmit based on AoI threshold
     transmitting_users = (rand(1, N) < 0.5) .* (AoI_users >= delta);
     transmitting_indices = find(transmitting_users);
+
     % Initialize received powers
     rx_powers_dBm = -inf(1, N); % Initialize with very low power
     for j = 1: length(Pt_values)
         Pt = Pt_values(j);
         P_T = 10 * log10(Pt);  % transmit power in dBW
 
+        % Phase 2: Calculate received power for transmitting users
         for user = transmitting_indices
-        % Generate random elevation angle (0-90 degrees in radians)
+        % Generate random elevation angle 
         theta = rand * (pi/2);
         
-        % Calculate distance using correct geometric formula
+        % Calculate distance
         d = calculate_distance(Re, h_u, h_s, theta);
         
         % Calculate K-factor using the provided formula
         K = calculate_K(f_T, Re, h_u, h_s, theta, c);
         
-        % Apply log-normal shadowing
+        % log-normal shadowing
         shadowing_dB = sigma_shadow * randn;
         
         % Calculate received power in dBm
@@ -84,8 +87,6 @@ for mc = 1:MC
             
             % Calculate Signal-to-Interference Ratio (SIR)
             SIR_dB = 10*log10(max_power_linear / interference_linear);
-            
-            % Debugging: print the SIR for debugging purposes
             disp(['SIR for captured user ', num2str(max_user), ': ', num2str(SIR_dB), ' dB']);
             
             if SIR_dB >= capture_th
