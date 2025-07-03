@@ -1,165 +1,115 @@
 clear; clc; close all;
 
 % Parameters
-f_T = 2.4e9; % Frequency band
-Pt_values = [2, 5, 10, 15]; % Transmit power values
-G_I = 0;          % Sensor antenna gain
-G_s = 15;         % Satellite antenna gain
-G_g = 30;         % Ground station antenna gain (assumed)
-T_sys = 1000;     % Receiver system noise temperature in K
-Re = 6371e3;      % Earth radius in meters
-h_s = 600e3;      % Altitude of satellite
-h_u = 0;          % Altitude of IoT sensors
-c = 3e8;          % Speed of light in m/s
-sigma_shadow = 3; % Shadowing standard deviation (dB)
-capture_th = 1;   % Capture threshold in dB
+f_T = 2400e6; % frequency 2.4 GHz
+Re = 6378e3; % earth radius
+h_s = 400e3; % satellite altitude
+h_u = 0; % ground sensor position
+G_t = 0; % sensor antenna gain
+G_s = 10^(15/10); % satellite antenna gain
+Lta = 10^(-1/10); % transmitter antenna losses
+Lra = 10^(-0.1/10); % receiver antenna losses
+La = 10^(-0.2/10); % atmospheric losses
+c = 3e8; % speed of light
+sigma_shadow = 3; % shadowing standard deviation
+snr_th = 1; % SNR threshold
+capture_th = 1; % capture threshold
+aoiThreshold = 1; % AoI threshold
+k_boltz = 1.380649e-23;% Boltzmann constant
+T_sys = 1000;  % System temperature (K)
+B = 128e3; % Bandwidth (Hz)
 
-N = 100; % Number of sensors
+% number of sensors
+N = 10;
+activationProbability = 1/N;
 
-% sensor positions 
-sensor_lat = 180 * rand(1, N) - 90;   % Latitude between -90° and 90°
-sensor_lon = 360 * rand(1, N) - 180;  % Longitude between -180° and 180°
+% noise
+noise_power = k_boltz * T_sys * B;
 
-MC = 1000; % Number of Monte Carlo simulations
-delta = 1;  % AoI threshold
-AoI_users = ones(1, N); % AoI for each user is 1 (fresh info)
-AverageAoI = zeros(1, MC); % average AoI 
-peak_AoI = 0;             % Peak AoI
-peak_AoI_num = 0;         % Count of peak AoI occurrences
+% monte carlo
+MC = 1e5;
 
-% Initialize AoI storage and elevation angle
-AoI_phase2 = zeros(N, length(Pt_values));  
-elev_angles = linspace(0, 90, N);
+% transmit power
+Pt = 10;
 
-% Monte Carlo simulation
-for mc = 1:MC
-    % IoT sensors decide to transmit based on AoI threshold
-    transmitting_users = (rand(1, N) < 0.5) .* (AoI_users >= delta);
-    transmitting_indices = find(transmitting_users);
+% elevation angel
+ElevAngle = 10:10:90;
+avgAoIresult = zeros(size(ElevAngle));
 
-    % 1. Initialize received powers
-    rx_powers_dBm = -inf(1, N); 
-    for j = 1:length(Pt_values)
-        Pt = Pt_values(j);
-        P_T = Pt;  
+for angleElevation = 1:length(ElevAngle)
+    ElevDeg = ElevAngle(angleElevation);
+    ElevRad = deg2rad(ElevDeg);
 
-        % 2. Calculate received power 
-        for user = transmitting_indices
-            theta = rand * (pi/2);  % Elevation angle 
+    aoiUsers = ones(1, N);
+    K = getKfromAngles(angleElevation);
+    d = sqrt((Re + h_s)^2 - (Re + h_u)^2 * cos(angleElevation).^2) - ((Re + h_u) * sin (angleElevation)) + rand(1,N)*10; % distance
+    pathLoss = (c ./ (4 * pi * f_T * d)).^2;
+    rxPower = Pt * G_s * G_t * pathLoss;
+    % receiverPDF = K * exp(-K .* (rxPower +1)) .* besseli (0, 2 * K .* sqrt(rxPower));
 
-            % Calculate distance
-            d = calculate_distance(Re, h_u, h_s, theta);
+    aoiCalculation = ones(1, N);
+    avgAoI = zeros(1, MC);
 
-            % Calculate K-factor
-            P_r = calculate_received_power(P_T, G_I, G_s, G_g, 0, sigma_shadow);  
-            K = calculate_K(f_T, Re, h_u, h_s, theta, c, P_r);
+    % monte carlo simulation
+    for mc = 1: MC
+        FindActiveUsers = (aoiUsers >= delta) & (randn(1,N) <activationProbability);
+        activeUsers = find(FindActiveUsers);
+        receiverPowerUsers = zeros(1,N);
+        captureSensor = 0;
 
-            % Log-normal shadowing
-            shadowing_dB = sigma_shadow * randn;  % shadowing noise
+        if ~isempty(activeUsers)
+            K_linear = 10^(K/10);
 
-            % Calculate received power in dBm
-            rx_powers_dBm(user) = calculate_received_power(P_T, G_I, G_s, G_g, K, shadowing_dB);
+            for j = 1:length(activeUsers)
+                users = activeUsers (j);
 
-            AoI_phase2(user, j) = AoI_users(user);
-        end
-    end
+                s_dB = rand(0, 1, [1,N]);
+                shadowing = 10^(s_dB/10);
 
-    % 3 Capture effect
-    captured_user = 0;
-        if ~isempty(transmitting_indices)
-        % To find the strongest signal
-            [max_power_dBm, max_idx] = max(rx_powers_dBm(transmitting_indices));
-            max_user = transmitting_indices(max_idx);
-    
-            % Calculate interference from other transmitters
-            other_powers = rx_powers_dBm(transmitting_indices);
-            other_powers(max_idx) = [];  
-    
-        if isempty(other_powers)
-            captured_user = max_user;
-        else
-            % Convert to linear for SIR calculation
-            max_power_linear = 10.^(max_power_dBm / 10);
-            interference_linear = sum(10.^(other_powers / 10));
+                receiverPowerUsers(users) = Pt * G_t * G_s * shadowing * Lta * Lra * La;
+            end
 
-        if interference_linear == 0
-            SIR_dB = inf;  
-        else
-            % Signal-to-Interference Ratio
-            SIR_dB = 10 * log10(max_power_linear / interference_linear);
-        end
-        
-        % Check if SIR is above the capture threshold
-        if SIR_dB >= capture_th
-            captured_user = max_user;
+            % capture effect
+            activePower = receiverPowerUsers(activeUsers);
+            [maxPower, highestReceivedPower] = max(activePower);
+
+            % check SNR
+            if maxPower < noise_power * snr_th
+                captureSensor = 0;
+            else
+                % check SINR
+                interference = sum(activePower) - maxPower;
+                SINR = maxPower / (interference + noise_power);
+
+                if SINR >= capture_th
+                    captureSensor = activeUsers(highestReceivedPower);
+                end
             end
         end
-    end
+        %  AoI
+        aoiCalculation = aoiCalculation + 1;
 
-    % 4. Update AoI based on captured power
-    for user = 1:N
-        AoI_users(user) = AoI_users(user) + 1;  
-
-        % Reset AoI for captured user
-        if user == captured_user
-            peak_AoI = peak_AoI + AoI_users(user);
-            peak_AoI_num = peak_AoI_num + 1;
-            AoI_users(user) = 0;
+        if captureSensor > 0
+            aoiCalculation(captureSensor) = 0;
         end
+        % storing results
+        avgAoI(mc) = mean(aoiCalculation);
     end
-
-    % 5. Calculate average AoI
-    AverageAoI(mc) = mean(AoI_users);
-
-    if mod(mc, 100) == 0
-        fprintf('Monte Carlo Iteration: %d\n', mc);
-        fprintf('  Current Average AoI: %.2f\n', AverageAoI(mc));
-        if captured_user > 0
-            fprintf('  Captured sensor: %d at (%.2f°, %.2f°)\n', ...
-                    captured_user, sensor_lat(captured_user), sensor_lon(captured_user));
-        else
-            fprintf('  No capture in this iteration\n');
-        end
-    end
+    % stored AoI
+    avgAoIresult(angleElevation) = mean(avgAoI);
+    fprintf('Elevation: %d° completed | Avg AoI: %.2f\n', ElevDeg, avgAoIresult);
 end
 
-% 6. Calculate distance
-function d = calculate_distance(Re, h_u, h_s, theta)
-    term1 = (Re + h_s)^2 - (Re + h_u)^2 * cos(theta)^2;
-    term2 = (Re + h_u) * sin(theta);
-    d = sqrt(term1) - term2;
-end
-
-% 7. Calculate K-factor
-function K_final = calculate_K(f_T, Re, h_u, h_s, theta, c, P_r)
-    numerator = c;
-    denominator = 4 * pi * f_T * ...
-                 ( - (Re + h_u) * sin(theta) + ...
-                   sqrt( (Re + h_s)^2 - (Re + h_u)^2 * cos(theta)^2 ) );
-               
-    K_geom = (numerator / denominator)^2; 
-
-    K_final = exp(-K_geom * (P_r + 1)) * besseli(0, 2 * K_geom * sqrt(P_r)); 
-end
-
-% 8. Calculate received power
-function P_r_dBm = calculate_received_power(P_T, G_I, G_s, G_g, K, shadowing_dB)
-    P_T_dBm = 10 * log10(P_T * 1000);  % Convert to dBm
-
-    P_r_dBm = P_T_dBm + G_I + G_s + G_g + 10 * log10(K) + shadowing_dB;  % Including K and shadowing
-end
-
-% Plot AoI vs Elevation Angle
 figure;
-hold on;
-plot(elev_angles, AoI_phase2(:, 1), '-o', 'LineWidth', 2);
-plot(elev_angles, AoI_phase2(:, 2), '-s', 'LineWidth', 2);
-plot(elev_angles, AoI_phase2(:, 3), '-^', 'LineWidth', 2);
-plot(elev_angles, AoI_phase2(:, 4), '-d', 'LineWidth', 2);
-
-xlabel('Elevation Angle (degrees)');
-ylabel('Age of Information (seconds)');
-title('AoI vs Elevation Angle');
+plot(ElevAngle, avgAoIresult, 'bo-', 'LineWidth', 2, 'MarkerSize', 8);
 grid on;
-legend(arrayfun(@(pt) sprintf('Pt = %d', pt), Pt_values, 'UniformOutput', false));
-hold off;
+xlabel('Elevation Angle (degrees)');
+ylabel('Average Age of Information (slots)');
+title('AoI Performance vs. Satellite Elevation Angle');
+xticks(ElevAngle);
+
+function K = getKfromAngles(angleElevation)
+K_values = [0.9, 1.5, 2.2, 4.1, 8.9, 11.4, 13.5, 15.2, 18.6];
+K_angles = [10, 20, 30, 40, 50, 60, 70, 80, 90];
+K = K_values(K_angles==angleElevation);
+end
