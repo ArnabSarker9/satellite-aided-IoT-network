@@ -26,7 +26,7 @@ activationProbability = 1/500; % Base activation probability
 noisePower = 1/10^(SNR/10); % Noise power based on SNR
 
 % Monte Carlo iteration number
-MC = 1e4;
+MC = 1e5;
 
 % Transmit power
 Pt = 10;
@@ -46,77 +46,67 @@ fprintf('Running Monte Carlo Loop 1: Varying Number of Satellites\n');
 satelliteRange = [10, 20, 30, 40, 50, 60, 70, 80, 90, 100];
 aoiVsSats = zeros(size(satelliteRange));
 
-for satIdx = 1:length(satelliteRange)
+% Check if a parallel pool is already active; start one if not
+if isempty(gcp('nocreate'))
+    parpool(10); % Start a parallel pool with default number of workers
+end
+
+parfor satIdx = 1:length(satelliteRange)
     currentNumSats = satelliteRange(satIdx);
     fprintf('Processing %d satellites...\n', currentNumSats);
-    
     % Initialize satellite positions for current number
     initialAngles = unifrnd(0, 2*pi, [1 currentNumSats]);
-    
     % For AoI tracking
     aoiUsers = ones(1, N);
     totalAvgAoI = 0;
-    
     % Monte Carlo simulation for current number of satellites
     for mc = 1:MC
         currentTime = mc * timeThisMC;
-        
         % Update satellite positions and calculate elevation angles
         satelliteElevations = zeros(1, currentNumSats);
         for sat = 1:currentNumSats
             orbitAngle = initialAngles(sat) + omega * currentTime;
             orbitAngle = mod(orbitAngle, 2*pi);
             elevationAngle = rad2deg(orbitAngle);
-            
             if elevationAngle > 90
                 elevationAngle = 180 - elevationAngle;
             end
-            
             if elevationAngle < 10
                 elevationAngle = 0;
             end
-            
             if elevationAngle > 10 && elevationAngle <= 90
                 satelliteElevations(sat) = elevationAngle;
             end
         end
-        
         % Remove satellites that are below horizon
         validSats = (satelliteElevations >= 10) & (satelliteElevations <= 90);
         satelliteElevations = satelliteElevations(validSats);
         numValidSats = sum(validSats);
-        
         if numValidSats == 0
             aoiUsers = aoiUsers + 1;
             continue;
         end
-        
         % Pre-calculate PDFs and CDFs for valid satellites
         satellitePDFs = cell(1, numValidSats);
         satelliteCDFs = cell(1, numValidSats);
         P = 0.001:0.001:10;
-        
         for sat = 1:numValidSats
             ElevDeg = satelliteElevations(sat);
             K_dB = getKfromAngles(ElevDeg);
             K_linear = 10^(K_dB/10);
-            
             % Calculate Rician PDF
             pdf_RX = K_linear .* exp(-K_linear .* (P + 1)) .* besseli(0, 2 .* K_linear .* sqrt(P));
             areaUnderPDF = trapz(P, pdf_RX);
             pdfNormalized = pdf_RX / areaUnderPDF;
             cdfRx = cumtrapz(P, pdfNormalized);
-            
             satellitePDFs{sat} = pdfNormalized;
             satelliteCDFs{sat} = cdfRx;
         end
-        
         % Find active users
         FindActiveUsers = (aoiUsers >= delta) & (rand(1,N) < activationProbability);
         activeUsers = find(FindActiveUsers);
         receivePowerUsers = zeros(numValidSats, N);
         captureSensor = zeros(1, numValidSats);
-
         if ~isempty(activeUsers)
             % Generate received power for each active user at each satellite
             for j = 1:length(activeUsers)
@@ -133,7 +123,6 @@ for satIdx = 1:length(satelliteRange)
                     receivePowerUsers(sat, currentActiveUser) = samplePower;
                 end
             end
-
             % Capture effect per satellite
             for sat = 1:numValidSats
                 userForThisSat = activeUsers;
@@ -141,17 +130,14 @@ for satIdx = 1:length(satelliteRange)
                     activePower = receivePowerUsers(sat, userForThisSat);
                     [maxPower, positionOfMaxPower] = max(activePower);
                     strongestUser = userForThisSat(positionOfMaxPower);
-
                     % Check for deep fading
                     if maxPower < capture_th
                         continue;
                     end
-
                     % SINR calculation
                     noisePowerIt = randn() * sqrt(noisePower);
                     interference = sum(activePower) - maxPower;
                     SINR = maxPower / (interference + noisePowerIt);
-
                     % Check if SINR meets threshold
                     if 10*log10(SINR) >= 3
                         captureSensor(sat) = strongestUser;
@@ -159,100 +145,86 @@ for satIdx = 1:length(satelliteRange)
                 end
             end
         end
-
         % AoI update
         aoiUsers = aoiUsers + 1;
-
         % Reset AoI for captured sensors
         successfulCaptures = find(captureSensor > 0);
         for idx = 1:length(successfulCaptures)
-            sat = successfulCaptures(idx);
-            capturedUser = captureSensor(sat);
+            successSat = successfulCaptures(idx);
+            capturedUser = captureSensor(successSat);
             aoiUsers(capturedUser) = 0;
         end
-        
         totalAvgAoI = totalAvgAoI + mean(aoiUsers);
     end
-    
-    aoiVsSats(satIdx) = totalAvgAoI / MC;
+    aoiVsSats(satIdx) = (totalAvgAoI / MC); % Convert to milliseconds
 end
 
 %% Monte Carlo Loop 2: Varying Activation Probability
 fprintf('Running Monte Carlo Loop 2: Varying Activation Probability\n');
-probRange = [1/2, 1/3, 1/5, 1/10, 1/20, 1/50, 1/100, 1/500];
+probRange = (1:10)/500;
 aoiVsProb = zeros(size(probRange));
-
 % Initialize satellite positions (using base number)
 initialAngles = unifrnd(0, 2*pi, [1 numSatellites]);
 
-for probIdx = 1:length(probRange)
+% Check if a parallel pool is already active; start one if not
+if isempty(gcp('nocreate'))
+    parpool(10); % Start a parallel pool with default number of workers
+end
+
+parfor probIdx = 1:length(probRange)
     currentProb = probRange(probIdx);
-    fprintf('Processing activation probability 1/%.0f...\n', 1/currentProb);
-    
+    fprintf('Processing activation probability %.4f...\n', currentProb);
     % For AoI tracking
     aoiUsers = ones(1, N);
     totalAvgAoI = 0;
-    
     % Monte Carlo simulation for current activation probability
     for mc = 1:MC
         currentTime = mc * timeThisMC;
-        
         % Update satellite positions and calculate elevation angles
         satelliteElevations = zeros(1, numSatellites);
         for sat = 1:numSatellites
             orbitAngle = initialAngles(sat) + omega * currentTime;
             orbitAngle = mod(orbitAngle, 2*pi);
             elevationAngle = rad2deg(orbitAngle);
-            
             if elevationAngle > 90
                 elevationAngle = 180 - elevationAngle;
             end
-            
             if elevationAngle < 10
                 elevationAngle = 0;
             end
-            
             if elevationAngle > 10 && elevationAngle <= 90
                 satelliteElevations(sat) = elevationAngle;
             end
         end
-        
         % Remove satellites that are below horizon
         validSats = (satelliteElevations >= 10) & (satelliteElevations <= 90);
         satelliteElevations = satelliteElevations(validSats);
         numValidSats = sum(validSats);
-        
         if numValidSats == 0
             aoiUsers = aoiUsers + 1;
             continue;
         end
-        
         % Pre-calculate PDFs and CDFs for valid satellites
         satellitePDFs = cell(1, numValidSats);
         satelliteCDFs = cell(1, numValidSats);
         P = 0.001:0.001:10;
-        
         for sat = 1:numValidSats
             ElevDeg = satelliteElevations(sat);
             K_dB = getKfromAngles(ElevDeg);
             K_linear = 10^(K_dB/10);
-            
             % Calculate Rician PDF
             pdf_RX = K_linear .* exp(-K_linear .* (P + 1)) .* besseli(0, 2 .* K_linear .* sqrt(P));
             areaUnderPDF = trapz(P, pdf_RX);
             pdfNormalized = pdf_RX / areaUnderPDF;
             cdfRx = cumtrapz(P, pdfNormalized);
-            
             satellitePDFs{sat} = pdfNormalized;
             satelliteCDFs{sat} = cdfRx;
         end
-        
         % Find active users
         FindActiveUsers = (aoiUsers >= delta) & (rand(1,N) < currentProb);
         activeUsers = find(FindActiveUsers);
         receivePowerUsers = zeros(numValidSats, N);
         captureSensor = zeros(1, numValidSats);
-
         if ~isempty(activeUsers)
             % Generate received power for each active user at each satellite
             for j = 1:length(activeUsers)
@@ -269,7 +241,6 @@ for probIdx = 1:length(probRange)
                     receivePowerUsers(sat, currentActiveUser) = samplePower;
                 end
             end
-
             % Capture effect per satellite
             for sat = 1:numValidSats
                 userForThisSat = activeUsers;
@@ -277,17 +248,14 @@ for probIdx = 1:length(probRange)
                     activePower = receivePowerUsers(sat, userForThisSat);
                     [maxPower, positionOfMaxPower] = max(activePower);
                     strongestUser = userForThisSat(positionOfMaxPower);
-
                     % Check for deep fading
                     if maxPower < capture_th
                         continue;
                     end
-
                     % SINR calculation
                     noisePowerIt = randn() * sqrt(noisePower);
                     interference = sum(activePower) - maxPower;
                     SINR = maxPower / (interference + noisePowerIt);
-
                     % Check if SINR meets threshold
                     if 10*log10(SINR) >= 3
                         captureSensor(sat) = strongestUser;
@@ -295,100 +263,86 @@ for probIdx = 1:length(probRange)
                 end
             end
         end
-
         % AoI update
         aoiUsers = aoiUsers + 1;
-
         % Reset AoI for captured sensors
         successfulCaptures = find(captureSensor > 0);
         for idx = 1:length(successfulCaptures)
-            sat = successfulCaptures(idx);
-            capturedUser = captureSensor(sat);
+            successSat = successfulCaptures(idx);
+            capturedUser = captureSensor(successSat);
             aoiUsers(capturedUser) = 0;
         end
-        
         totalAvgAoI = totalAvgAoI + mean(aoiUsers);
     end
-    
-    aoiVsProb(probIdx) = totalAvgAoI / MC;
+    aoiVsProb(probIdx) = (totalAvgAoI / MC); % Convert to milliseconds
 end
 
 %% Monte Carlo Loop 3: Varying Number of Devices
 fprintf('Running Monte Carlo Loop 3: Varying Number of Devices\n');
 deviceRange = [10, 20, 30, 40, 50, 60, 70, 80, 90, 100];
 aoiVsDevices = zeros(size(deviceRange));
-
 % Initialize satellite positions (using base number)
 initialAngles = unifrnd(0, 2*pi, [1 numSatellites]);
 
-for devIdx = 1:length(deviceRange)
+% Check if a parallel pool is already active; start one if not
+if isempty(gcp('nocreate'))
+    parpool(10); % Start a parallel pool with default number of workers
+end
+
+parfor devIdx = 1:length(deviceRange)
     currentN = deviceRange(devIdx);
     fprintf('Processing %d devices...\n', currentN);
-    
     % For AoI tracking
     aoiUsers = ones(1, currentN);
     totalAvgAoI = 0;
-    
     % Monte Carlo simulation for current number of devices
     for mc = 1:MC
         currentTime = mc * timeThisMC;
-        
         % Update satellite positions and calculate elevation angles
         satelliteElevations = zeros(1, numSatellites);
         for sat = 1:numSatellites
             orbitAngle = initialAngles(sat) + omega * currentTime;
             orbitAngle = mod(orbitAngle, 2*pi);
             elevationAngle = rad2deg(orbitAngle);
-            
             if elevationAngle > 90
                 elevationAngle = 180 - elevationAngle;
             end
-            
             if elevationAngle < 10
                 elevationAngle = 0;
             end
-            
             if elevationAngle > 10 && elevationAngle <= 90
                 satelliteElevations(sat) = elevationAngle;
             end
         end
-        
         % Remove satellites that are below horizon
         validSats = (satelliteElevations >= 10) & (satelliteElevations <= 90);
         satelliteElevations = satelliteElevations(validSats);
         numValidSats = sum(validSats);
-        
         if numValidSats == 0
             aoiUsers = aoiUsers + 1;
             continue;
         end
-        
         % Pre-calculate PDFs and CDFs for valid satellites
         satellitePDFs = cell(1, numValidSats);
         satelliteCDFs = cell(1, numValidSats);
         P = 0.001:0.001:10;
-        
         for sat = 1:numValidSats
             ElevDeg = satelliteElevations(sat);
             K_dB = getKfromAngles(ElevDeg);
             K_linear = 10^(K_dB/10);
-            
             % Calculate Rician PDF
             pdf_RX = K_linear .* exp(-K_linear .* (P + 1)) .* besseli(0, 2 .* K_linear .* sqrt(P));
             areaUnderPDF = trapz(P, pdf_RX);
             pdfNormalized = pdf_RX / areaUnderPDF;
             cdfRx = cumtrapz(P, pdfNormalized);
-            
             satellitePDFs{sat} = pdfNormalized;
             satelliteCDFs{sat} = cdfRx;
         end
-        
         % Find active users
         FindActiveUsers = (aoiUsers >= delta) & (rand(1,currentN) < activationProbability);
         activeUsers = find(FindActiveUsers);
         receivePowerUsers = zeros(numValidSats, currentN);
         captureSensor = zeros(1, numValidSats);
-
         if ~isempty(activeUsers)
             % Generate received power for each active user at each satellite
             for j = 1:length(activeUsers)
@@ -405,7 +359,6 @@ for devIdx = 1:length(deviceRange)
                     receivePowerUsers(sat, currentActiveUser) = samplePower;
                 end
             end
-
             % Capture effect per satellite
             for sat = 1:numValidSats
                 userForThisSat = activeUsers;
@@ -413,17 +366,14 @@ for devIdx = 1:length(deviceRange)
                     activePower = receivePowerUsers(sat, userForThisSat);
                     [maxPower, positionOfMaxPower] = max(activePower);
                     strongestUser = userForThisSat(positionOfMaxPower);
-
                     % Check for deep fading
                     if maxPower < capture_th
                         continue;
                     end
-
                     % SINR calculation
                     noisePowerIt = randn() * sqrt(noisePower);
                     interference = sum(activePower) - maxPower;
                     SINR = maxPower / (interference + noisePowerIt);
-
                     % Check if SINR meets threshold
                     if 10*log10(SINR) >= 3
                         captureSensor(sat) = strongestUser;
@@ -431,22 +381,18 @@ for devIdx = 1:length(deviceRange)
                 end
             end
         end
-
         % AoI update
         aoiUsers = aoiUsers + 1;
-
         % Reset AoI for captured sensors
         successfulCaptures = find(captureSensor > 0);
         for idx = 1:length(successfulCaptures)
-            sat = successfulCaptures(idx);
-            capturedUser = captureSensor(sat);
+            successSat = successfulCaptures(idx);
+            capturedUser = captureSensor(successSat);
             aoiUsers(capturedUser) = 0;
         end
-        
         totalAvgAoI = totalAvgAoI + mean(aoiUsers);
     end
-    
-    aoiVsDevices(devIdx) = totalAvgAoI / MC;
+    aoiVsDevices(devIdx) = (totalAvgAoI / MC); % Convert to milliseconds
 end
 
 %% Results Plotting
@@ -454,33 +400,35 @@ end
 figure;
 plot(satelliteRange, aoiVsSats, '-o', 'LineWidth', 2);
 xlabel('Number of Satellites');
-ylabel('Average AoI');
+ylabel('Average AoI (milliseconds)');
 title('Average AoI vs Number of Satellites');
 grid on;
 
+%% Results Plotting
 % 2. Plot AoI vs Activation Probability
 figure;
-probLabels = {'1/2', '1/3', '1/5', '1/10', '1/20', '1/50', '1/100', '1/500'};
+probLabels = arrayfun(@(x) sprintf('%.4f', x), probRange, 'UniformOutput', false);
 plot(1:length(probRange), aoiVsProb, '-o', 'LineWidth', 2);
 xlabel('Activation Probability');
-ylabel('Average AoI');
+ylabel('Average AoI (milliseconds)');
 title('Average AoI vs Activation Probability');
 set(gca, 'XTick', 1:length(probRange), 'XTickLabel', probLabels);
 grid on;
 
+%% Results Plotting
 % 3. Plot AoI vs Number of Devices
 figure;
 plot(deviceRange, aoiVsDevices, '-o', 'LineWidth', 2);
 xlabel('Number of Devices');
-ylabel('Average AoI');
-title('Average AoI vs Number of Devices');
+ylabel('Average AoI (milliseconds)');
+title(['Average AoI vs Number of Devices (', num2str(numSatellites), ' Satellites)']);
 grid on;
+
 
 % Function to get K-factor from elevation angle with validation
 function K = getKfromAngles(angleElevation)
     K_values = [0.9, 1.5, 2.2, 4.1, 8.9, 11.4, 13.5, 15.2, 18.6];
     K_angles = [10, 20, 30, 40, 50, 60, 70, 80, 90];
-
     if angleElevation < 10
         K = K_values(1);
     elseif angleElevation > 90
